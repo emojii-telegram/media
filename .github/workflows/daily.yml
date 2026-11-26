@@ -1,0 +1,26 @@
+# Daily 09:00 MSK: fill the Buffer queue (TikTok 2 videos/day, X 1 text post/day) a few days ahead.
+name: daily-posts
+on:
+  schedule: [{ cron: '0 6 * * *' }]
+  workflow_dispatch: {}
+permissions: { contents: write }
+concurrency: { group: agent-state, cancel-in-progress: false }
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: node agent/daily.mjs
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          NOTIFY_BOT_TOKEN: ${{ secrets.NOTIFY_BOT_TOKEN }}
+          NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
+      - name: save state
+        run: |
+          git config user.name "emojii-agent"; git config user.email "agent@users.noreply.github.com"
+          git add state && git commit -m "daily state" && git pull --rebase && git push || echo "no state change"
