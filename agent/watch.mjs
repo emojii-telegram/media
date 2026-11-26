@@ -92,11 +92,12 @@ for (const c of CHANNELS) {
       ? { text: `↩️ Ответить: вариант ${i + 1}`, url: `https://x.com/intent/post?in_reply_to=${xid}&text=${encodeURIComponent(x)}` }
       : { text: `📋 Скопировать вариант ${i + 1}`, copy_text: { text: x } }]);
     rows.push([{ text: `Открыть ${xid ? 'пост' : '@' + c.x} в X`, url: xid ? `https://x.com/${c.x}/status/${xid}` : `https://x.com/${c.x}` }]);
-    await tg('sendMessage', { chat_id: id, parse_mode: 'HTML', disable_web_page_preview: true,
+    const sent = await tg('sendMessage', { chat_id: id, parse_mode: 'HTML', disable_web_page_preview: true,
       text: `🆕 <b>@${c.x}</b>: ${esc(p.text.slice(0, 300))}${p.text.length > 300 ? '…' : ''}\n\n` +
         d.map((x, i) => `<b>${i + 1}.</b> ${esc(x)}`).join('\n\n') +
         (xid ? '' : '\n\n<i>Пост в X не нашёлся автоматически: скопируй вариант, открой профиль и ответь под постом.</i>'),
       reply_markup: { inline_keyboard: rows } });
+    console.log(`  telegram: ${sent.ok ? 'sent' : sent.description} (x post id: ${xid || 'not found'})`);
   }
 }
 if (!dry) writeFileSync(statePath, JSON.stringify(state, null, 2));
