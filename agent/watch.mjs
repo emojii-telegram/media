@@ -44,16 +44,34 @@ async function chatId() {
 }
 
 function drafts(ch, post) {
-  const prompt = `Ты пишешь ответы в X (Twitter) от лица бренда Emojii — Telegram Mini App @emojii_robot с анимированными эмодзи
+  const prompt = `Ты ведёшь X (Twitter) бренда Emojii — Telegram Mini App @emojii_robot с анимированными эмодзи
 для статуса профиля и подарков друзьям. Вот свежий пост @${ch}:
 """${post.text.slice(0, 1500)}"""
-Дай 3 варианта ответа (каждый до 200 символов, язык — как у поста), по одному на строку, без нумерации и кавычек.
-Остроумно и по теме поста, как живой человек из комьюнити; без ссылок, без «скачайте/попробуйте», без лести и троллинга.
+Дай 3 варианта ответа под этот пост, по одному на строку, без нумерации и кавычек. Язык — как у поста.
+Стиль — как у самого аккаунта Telegram в X: коротко (до 140 символов), сухая ирония, молодёжно, мемно, интернет-сленг,
+можно строчными буквами, без восклицательных знаков. Эмодзи — 0, максимум 1 и только если он и есть шутка.
+Это шутка-реплика в треде, а не реклама: без ссылок, «скачайте/попробуйте», хэштегов, лести и троллинга.
+Три варианта должны быть разными по механике шутки (например: наблюдение, абсурд, самоирония).
 Никаких цен, доходности, «вырастет в цене», торговли, инвестиций, ставок, рандома и розыгрышей — даже если пост про это;
 в таком случае шути про сам Telegram, эмодзи или статусы. Если пост не даёт повода для уместного ответа — выведи только слово SKIP.`;
   const out = execFileSync('claude', ['-p', prompt, '--model', 'haiku', '--max-turns', '1', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
     { cwd: HERE, encoding: 'utf8', timeout: 180000 }).trim();
-  return out === 'SKIP' ? [] : out.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 3);
+  return out === 'SKIP' ? [] : out.split('\n').map((s) => s.trim().replace(/^["«]|["»]$/g, '')).filter(Boolean).slice(0, 3);
+}
+
+// Best effort: find the same post on X (public embed timeline) to open the reply composer directly.
+// That endpoint is often rate-limited; without the id the buttons copy the text instead.
+async function xPostId(handle, post) {
+  try {
+    const html = await (await fetch(`https://syndication.twitter.com/srv/timeline-profile/screen-name/${handle}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' } })).text();
+    const data = JSON.parse(html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+    const norm = (t) => t.toLowerCase().replace(/https?:\S+/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, 40);
+    const want = norm(post.text);
+    const hit = data.props.pageProps.timeline.entries.map((e) => e.content?.tweet).filter(Boolean)
+      .find((t) => norm(t.full_text || t.text || '').startsWith(want.slice(0, 25)));
+    return hit?.id_str || null;
+  } catch { return null; }
 }
 
 const id = dry ? 'dry' : await chatId();
@@ -68,11 +86,17 @@ for (const c of CHANNELS) {
     const d = drafts(c.tg, p);
     console.log(`${c.tg}/${p.id}: ${d.length} drafts`);
     if (!d.length || dry) { d.forEach((x) => console.log('  ', x)); continue; }
+    const xid = await xPostId(c.x, p);
+    // reply buttons open X's composer already replying to the post; otherwise one tap copies the text
+    const rows = d.map((x, i) => [xid
+      ? { text: `↩️ Ответить: вариант ${i + 1}`, url: `https://x.com/intent/post?in_reply_to=${xid}&text=${encodeURIComponent(x)}` }
+      : { text: `📋 Скопировать вариант ${i + 1}`, copy_text: { text: x } }]);
+    rows.push([{ text: `Открыть ${xid ? 'пост' : '@' + c.x} в X`, url: xid ? `https://x.com/${c.x}/status/${xid}` : `https://x.com/${c.x}` }]);
     await tg('sendMessage', { chat_id: id, parse_mode: 'HTML', disable_web_page_preview: true,
       text: `🆕 <b>@${c.x}</b>: ${esc(p.text.slice(0, 300))}${p.text.length > 300 ? '…' : ''}\n\n` +
-        `Ответы (нажми, чтобы скопировать):\n${d.map((x) => `<code>${esc(x)}</code>`).join('\n\n')}`,
-      reply_markup: { inline_keyboard: [[{ text: `Открыть @${c.x} в X`, url: `https://x.com/${c.x}` }],
-        [{ text: 'Пост в Telegram', url: `https://t.me/${c.tg}/${p.id}` }]] } });
+        d.map((x, i) => `<b>${i + 1}.</b> ${esc(x)}`).join('\n\n') +
+        (xid ? '' : '\n\n<i>Пост в X не нашёлся автоматически: скопируй вариант, открой профиль и ответь под постом.</i>'),
+      reply_markup: { inline_keyboard: rows } });
   }
 }
 if (!dry) writeFileSync(statePath, JSON.stringify(state, null, 2));
