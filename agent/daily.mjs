@@ -1,7 +1,7 @@
 // Cloud daily job (GitHub Actions): keeps the Buffer queue filled a few days ahead without the Mac.
 // TikTok: 2 videos/day at 13:00 and 19:00 MSK from the pre-hosted backlog (agent/backlog.json), published automatically.
-// X: 1 text post/day; Claude picks the time (10:00–22:00 MSK). Titles, hashtags, X posts: ONE short `claude -p --model haiku` call,
-// no web search, and only when there is something to plan (most days the queue is full and Claude is not called at all).
+// X: 1 text post/day; Claude picks the time (10:00–22:00 MSK). Titles, hashtags, X posts: ONE short `claude -p --model haiku` call
+// that uses state/trends.json (refreshed twice a day by trends.mjs); called only when there is something to plan.
 // Env: BUFFER_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, NOTIFY_BOT_TOKEN + NOTIFY_CHAT_ID (optional: warnings to Telegram).
 // Usage: node agent/daily.mjs [--dry]
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -29,6 +29,7 @@ const read = (p, d) => (existsSync(resolve(ROOT, p)) ? JSON.parse(readFileSync(r
 mkdirSync(resolve(ROOT, 'state'), { recursive: true });
 const posted = { videos: [], ...read('state/posted.json', {}) };
 const backlog = read('agent/backlog.json', []);
+const trends = read('state/trends.json', null);
 
 async function api(query, variables) {
   const r = await fetch('https://api.buffer.com', { method: 'POST',
@@ -91,7 +92,7 @@ x — ${xs.length} шт., НА АНГЛИЙСКОМ, для дней: ${xs.map((
  text: до 240 симв., смешная мысль про жизнь в Telegram, эмодзи-статусы, подарки эмодзи; стиль аккаунта Telegram в X: сухая ирония,
  строчные ок, без «!», эмодзи 0–1, 0–1 хэштег, без @ и ссылок, не про Дурова.
  time: время публикации по Москве ${X_WINDOW.join('–')}, когда этот пост лучше зайдёт (учти день недели и тон), не круглое.
-Запрещено: деньги, цены, Stars, TON, заработок, инвестиции, «редкость = ценность», рандом, ставки, розыгрыши, школа, дети,
+${trends ? `Тренды (${trends.updated.slice(0, 10)}), используй где уместно: ${JSON.stringify({ ...trends, updated: undefined })}\n` : ''}Запрещено: деньги, цены, Stars, TON, заработок, инвестиции, «редкость = ценность», рандом, ставки, розыгрыши, школа, дети,
 реальные люди и бренды, цитаты песен, обманный кликбейт.`;
 const out = claude(['-p', ask, '--model', 'haiku', '--max-turns', '1', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
   { cwd: ROOT, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'inherit'] });
