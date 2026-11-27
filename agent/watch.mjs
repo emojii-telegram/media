@@ -46,7 +46,7 @@ async function chatId() {
 function drafts(ch, post) {
   const prompt = `Ты ведёшь X (Twitter) бренда Emojii — Telegram Mini App @emojii_robot с анимированными эмодзи
 для статуса профиля и подарков друзьям. Вот свежий пост @${ch}:
-"""${post.text.slice(0, 1500)}"""
+"""${post.text.slice(0, 700)}"""
 Дай 3 варианта ответа под этот пост, по одному на строку, без нумерации и кавычек. Язык — всегда английский.
 Стиль — как у самого аккаунта Telegram в X: коротко (до 140 символов), сухая ирония, молодёжно, мемно, интернет-сленг,
 можно строчными буквами, без восклицательных знаков. Эмодзи — 0, максимум 1 и только если он и есть шутка.
@@ -54,6 +54,8 @@ function drafts(ch, post) {
 Три варианта должны быть разными по механике шутки (например: наблюдение, абсурд, самоирония).
 Никаких цен, доходности, «вырастет в цене», торговли, инвестиций, ставок, рандома и розыгрышей — даже если пост про это;
 в таком случае шути про сам Telegram, эмодзи или статусы. Если пост не даёт повода для уместного ответа — выведи только слово SKIP.`;
+  try { execFileSync('claude', ['--version'], { stdio: 'ignore' }); } // install the CLI only when a new post needs drafts
+  catch { execFileSync('npm', ['install', '-g', '--silent', '@anthropic-ai/claude-code'], { stdio: 'inherit' }); }
   const out = execFileSync('claude', ['-p', prompt, '--model', 'haiku', '--max-turns', '1', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
     { cwd: HERE, encoding: 'utf8', timeout: 180000 }).trim();
   return out === 'SKIP' ? [] : out.split('\n').map((s) => s.trim().replace(/^["«]|["»]$/g, '')).filter(Boolean).slice(0, 3);
