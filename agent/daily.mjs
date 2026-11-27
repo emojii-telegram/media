@@ -1,6 +1,7 @@
 // Cloud daily job (GitHub Actions): keeps the Buffer queue filled a few days ahead without the Mac.
 // TikTok: 2 videos/day at 13:00 and 19:00 MSK from the pre-hosted backlog (agent/backlog.json), published automatically.
-// X: 1 text post/day at 16:00 MSK. Titles, hashtags and X posts are written by `claude -p` (Claude subscription token).
+// X: 1 text post/day; Claude picks the time (10:00–22:00 MSK). Titles, hashtags, X posts: ONE short `claude -p --model haiku` call,
+// no web search, and only when there is something to plan (most days the queue is full and Claude is not called at all).
 // Env: BUFFER_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, NOTIFY_BOT_TOKEN + NOTIFY_CHAT_ID (optional: warnings to Telegram).
 // Usage: node agent/daily.mjs [--dry]
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -8,13 +9,21 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
+// claude CLI is installed only when it is actually needed (saves CI time on idle runs)
+function claude(args, opts) {
+  try { execFileSync('claude', ['--version'], { stdio: 'ignore' }); }
+  catch { execFileSync('npm', ['install', '-g', '--silent', '@anthropic-ai/claude-code'], { stdio: 'inherit' }); }
+  return execFileSync('claude', args, opts);
+}
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dry = process.argv.includes('--dry');
 const env = process.env;
 const DAYS_AHEAD = 3;          // today + 3 days
 const QUEUE_CAP = 10;          // Buffer free plan: max scheduled posts in the organisation
 const TT_TIMES = ['13:00', '19:00'];
-const X_TIME = '16:00';
+const X_WINDOW = ['10:00', '22:00'];  // Claude chooses inside this window
+const X_FALLBACK = ['12:40', '13:20', '18:30', '19:45', '21:10'];
 const MSK = '+03:00';
 const read = (p, d) => (existsSync(resolve(ROOT, p)) ? JSON.parse(readFileSync(resolve(ROOT, p), 'utf8')) : d);
 mkdirSync(resolve(ROOT, 'state'), { recursive: true });
@@ -55,7 +64,7 @@ const slots = [];
 for (let k = 0; k <= DAYS_AHEAD; k++) {
   const day = mskDay(now + k * 86400e3);
   if (tiktok) TT_TIMES.slice(ttDays[day] || 0).forEach((hm) => { if (at(day, hm) > now + 15 * 60e3) slots.push({ ch: 'tiktok', due: at(day, hm) }); });
-  if (x && !xDays[day] && at(day, X_TIME) > now + 15 * 60e3) slots.push({ ch: 'x', due: at(day, X_TIME) });
+  if (x && !xDays[day] && at(day, X_WINDOW[1]) > now + 60 * 60e3) slots.push({ ch: 'x', day });
 }
 const done = new Set(posted.videos);
 const queue = backlog.filter((b) => !done.has(b.name));
@@ -69,31 +78,40 @@ for (const s of slots) {
 console.log(`today ${today}: scheduled ${scheduled.length}, planning ${plan.length} (tiktok ${plan.filter((p) => p.video).length}, x ${plan.filter((p) => !p.video).length})`);
 if (!plan.length) process.exit(0);
 
-// copy for all planned posts in one Claude call
-const ask = `Ты SMM бренда Emojii — Telegram Mini App @emojii_robot: анимированные эмодзи для статуса профиля Telegram и подарков друзьям.
-Сначала сделай 1–2 поиска WebSearch о трендах TikTok/X этой недели (для русскоязычной аудитории), чтобы подобрать хэштеги и тон.
-Затем верни ТОЛЬКО JSON: {"tiktok": [{"title": "…", "text": "…"}], "x": ["…"]}
-tiktok — ровно ${plan.filter((p) => p.video).length} элементов, по порядку для этих роликов (текст, который уже стоит в кадре):
-${plan.filter((p) => p.video).map((p, i) => `${i + 1}. ${p.video.overlay}`).join('\n') || '(нет)'}
-  title — цепляющий хук до 90 символов (интрига, узнаваемая боль, «отметь того, кто…», вопрос), не повторяй текст из кадра слово в слово, 1–2 эмодзи;
-  text — 1 строка-вопрос для комментариев + 5–7 хэштегов: 2–3 охватных (#рекомендации #юмор #мем #pov или трендовые), 2–3 нишевых (#telegram #телеграм #эмодзи #статус), всегда #emojii.
-x — ровно ${plan.filter((p) => !p.video).length} разных текстовых постов НА АНГЛИЙСКОМ (до 240 символов, 0–1 хэштег): короткая смешная мысль про жизнь в Telegram,
-  эмодзи-статусы, подарки эмодзи. Стиль — как у аккаунта Telegram в X: сухая ирония, молодёжно, можно строчными, без восклицательных знаков,
-  эмодзи 0–1. Без @упоминаний и ссылок, не от имени Telegram и не про Дурова.
-  (TikTok-тексты — по-русски.)
-Везде: никаких денег, цен, Stars, GRAM/TON, заработка, инвестиций, «редкость = ценность», рандома, ставок, розыгрышей; не про школу и не для детей;
-без реальных людей, знаменитостей, чужих брендов и цитат из песен; без обманного кликбейта.`;
-const out = execFileSync('claude', ['-p', ask, '--model', 'haiku', '--allowedTools', 'WebSearch', '--max-turns', '8'],
-  { cwd: ROOT, encoding: 'utf8', timeout: 600000, stdio: ['ignore', 'pipe', 'inherit'] });
+// copy for all planned posts in one short Claude call
+const tt = plan.filter((p) => p.video), xs = plan.filter((p) => !p.video);
+const dow = (d) => ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][new Date(`${d}T12:00:00Z`).getUTCDay()];
+const ask = `SMM бренда Emojii (Telegram Mini App @emojii_robot: анимированные эмодзи для статуса и подарков друзьям).
+Верни ТОЛЬКО JSON без пояснений: {"tiktok":[{"title":"","text":""}],"x":[{"time":"HH:MM","text":""}]}
+tiktok — ${tt.length} шт., ПО-РУССКИ, для роликов с текстом в кадре:
+${tt.map((p, i) => `${i + 1}. ${p.video.overlay}`).join('\n') || '(нет)'}
+ title: хук до 90 симв. (интрига/боль/«отметь того, кто…»/вопрос), не копируй текст кадра, 1–2 эмодзи;
+ text: вопрос для комментов + 5–7 хэштегов (#рекомендации #юмор #мем #pov + #telegram #телеграм #эмодзи #статус), всегда #emojii.
+x — ${xs.length} шт., НА АНГЛИЙСКОМ, для дней: ${xs.map((p) => `${p.day} (${dow(p.day)})`).join(', ') || '(нет)'}
+ text: до 240 симв., смешная мысль про жизнь в Telegram, эмодзи-статусы, подарки эмодзи; стиль аккаунта Telegram в X: сухая ирония,
+ строчные ок, без «!», эмодзи 0–1, 0–1 хэштег, без @ и ссылок, не про Дурова.
+ time: время публикации по Москве ${X_WINDOW.join('–')}, когда этот пост лучше зайдёт (учти день недели и тон), не круглое.
+Запрещено: деньги, цены, Stars, TON, заработок, инвестиции, «редкость = ценность», рандом, ставки, розыгрыши, школа, дети,
+реальные люди и бренды, цитаты песен, обманный кликбейт.`;
+const out = claude(['-p', ask, '--model', 'haiku', '--max-turns', '1', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
+  { cwd: ROOT, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'inherit'] });
 const copy = JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1));
 
+// X time from Claude, clamped to the window and at least 30 min from now; otherwise a random good slot
+function xDue(day, hm) {
+  const ok = (t) => t >= at(day, X_WINDOW[0]) && t <= at(day, X_WINDOW[1]) && t > now + 30 * 60e3;
+  const t = /^\d{1,2}:\d{2}$/.test(hm || '') ? at(day, hm.padStart(5, '0')) : null;
+  if (t && ok(t)) return t;
+  const alt = X_FALLBACK.map((h) => at(day, h)).filter(ok);
+  return alt[Math.floor(Math.random() * alt.length)] || new Date(now + 45 * 60e3);
+}
 let ti = 0, xi = 0;
 const log = [];
 for (const p of plan) {
   const input = p.video
-    ? (() => { const c = copy.tiktok[ti++] || {}; return { channelId: tiktok.id, text: `${c.title || p.video.overlay}\n\n${c.text || '#emojii #telegram #эмодзи #pov'}`,
+    ? (() => { const c = (copy.tiktok || [])[ti++] || {}; return { channelId: tiktok.id, text: `${c.title || p.video.overlay}\n\n${c.text || '#emojii #telegram #эмодзи #pov'}`,
         assets: [{ video: { url: p.video.url, metadata: { thumbnailOffset: 2500 } } }] }; })()
-    : { channelId: x.id, text: copy.x[xi++], assets: [] };
+    : (() => { const c = (copy.x || [])[xi++] || {}; p.due = xDue(p.day, c.time); return { channelId: x.id, text: typeof c === 'string' ? c : c.text, assets: [] }; })();
   if (!input.text) continue;
   const entry = { due: p.due.toISOString(), ch: p.ch, video: p.video?.name, text: input.text };
   if (!dry) {
